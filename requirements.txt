@@ -1,0 +1,10 @@
+streamlit>=1.36.0
+pandas>=2.2.0
+numpy>=1.26.0
+datasets>=2.19.0
+transformers>=4.42.0
+accelerate>=1.1.0
+torch>=2.3.0
+scikit-learn>=1.5.1
+plotly>=5.24.1
+reportlab>=4.2.5
