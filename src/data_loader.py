@@ -3,9 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-import numpy as np
 import pandas as pd
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, Value, load_dataset
 
 ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS_DIR = ROOT / "artifacts"
@@ -109,58 +108,51 @@ def build_fallback_dataset() -> DatasetDict:
 def load_or_generate_dataset() -> DatasetDict:
     try:
         dataset = load_dataset("banking77")
-        if isinstance(dataset, DatasetDict):
-            return dataset
-        return DatasetDict(dataset)
+        if not isinstance(dataset, DatasetDict):
+            dataset = DatasetDict(dataset)
     except Exception:
-        return build_fallback_dataset()
+        dataset = build_fallback_dataset()
 
+    if "train" not in dataset:
+        raise ValueError("The dataset must contain a 'train' split.")
 
-def get_intent_reference(dataset: DatasetDict | None = None) -> pd.DataFrame:
-    if dataset is not None:
-        label_names = getattr(dataset["train"].features["label"], "names", None)
-        if label_names:
-            records = [{"intent": label, "description": "Banking intent label", "examples": "Example query"} for label in label_names]
-            return pd.DataFrame(records)
+    if "test" not in dataset:
+        if len(dataset["train"]) < 3:
+            raise ValueError("At least three training examples are required to create validation and test splits.")
+        split = dataset["train"].train_test_split(test_size=0.2, seed=42)
+        dataset["train"] = split["train"]
+        dataset["test"] = split["test"]
 
-    records = []
-    for intent, templates in INTENT_PATTERNS.items():
-        records.append({
-            "intent": intent,
-            "description": "Banking customer support intent",
-            "examples": templates[0],
-        })
-    return pd.DataFrame(records)
+    if "validation" not in dataset:
+        if len(dataset["train"]) < 2:
+            raise ValueError("At least two training examples are required to create a validation split.")
+        split = dataset["train"].train_test_split(test_size=0.1, seed=42)
+        dataset["train"] = split["train"]
+        dataset["validation"] = split["test"]
 
+    label_names = getattr(dataset["train"].features.get("label"), "names", None)
+    for split_name, split in dataset.items():
+        if "text" not in split.features:
+            raise ValueError(f"The dataset split '{split_name}' must contain a 'text' column.")
+        if "label" not in split.features:
+            raise ValueError(f"The dataset split '{split_name}' must contain a 'label' column.")
+        if len(split) == 0:
+            raise ValueError(f"The dataset split '{split_name}' is empty.")
 
-def get_dataset_summary(dataset: DatasetDict) -> Dict[str, Any]:
-    train_df = dataset["train"].to_pandas()
-    valid_df = dataset["validation"].to_pandas() if "validation" in dataset else dataset["test"].to_pandas()
-    test_df = dataset["test"].to_pandas() if "test" in dataset else valid_df
+        split_label_names = getattr(split.features["label"], "names", None) or label_names
+        if split_label_names:
+            split = split.cast_column("label", Value("string"))
+            split = split.map(
+                lambda example, names=split_label_names: {
+                    "label": (
+                        names[int(example["label"])]
+                        if example["label"].isdigit() and int(example["label"]) < len(names)
+                        else example["label"]
+                    )
+                }
+            )
+        else:
+            split = split.cast_column("label", Value("string"))
+        dataset[split_name] = split
 
-    combined = pd.concat([train_df, valid_df, test_df], ignore_index=True)
-    combined["length"] = combined["text"].str.len()
-
-    if all(isinstance(item, str) for item in combined["label"].dropna().tolist()):
-        label_counts = combined["label"].value_counts().reset_index()
-        label_counts.columns = ["intent", "count"]
-    else:
-        label_counts = combined["label"].astype(str).value_counts().reset_index()
-        label_counts.columns = ["intent", "count"]
-
-    summary = {
-        "total_intents": int(combined["label"].nunique()),
-        "dataset_size": int(len(combined)),
-        "train_examples": int(len(train_df)),
-        "validation_examples": int(len(valid_df)),
-        "test_examples": int(len(test_df)),
-        "avg_query_length": float(combined["length"].mean()),
-        "max_query_length": int(combined["length"].max()),
-        "min_query_length": int(combined["length"].min()),
-        "common_intents": label_counts.head(10),
-        "rare_intents": label_counts.tail(10).sort_values("count", ascending=True),
-        "sample_preview": combined.head(10).copy(),
-        "label_counts": label_counts,
-        "query_lengths": combined["length"].tolist(),
-    }
-    return summary
+    return dataset
